@@ -1,0 +1,4 @@
+# Her satıra bir Kick klip bağlantısı koy.
+# Aşağıdakiler biçim örneğidir; gerçek klip değildir.
+https://kick.com/ornek-kanal/clips/clip_EXAMPLE_ONE
+https://kick.com/ornek-kanal?clip=clip_EXAMPLE_TWO
