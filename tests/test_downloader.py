@@ -1,6 +1,5 @@
 import contextlib
 import io
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,20 +18,12 @@ class DownloaderTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.env = patch.dict(os.environ, {}, clear=True)
-        self.env.start()
-        self.addCleanup(self.env.stop)
 
     def links(self, text):
         path = self.root / "list.txt"
         path.write_text(text, encoding="utf-8-sig")
         return path
 
-    def config(self, example=False):
-        path = self.root / "config.js"
-        values = ("YOUR_CLIENT_ID", "YOUR_CLIENT_SECRET") if example else ("test-id", "test-secret")
-        path.write_text(f'KICK_CLIENT_ID: "{values[0]}", KICK_CLIENT_SECRET: "{values[1]}"', encoding="utf-8")
-        return path
 
     def test_link_formats_and_normalization(self):
         for value in ["https://kick.com/demo/clips/clip_ONE", "http://www.kick.com/demo/?x=1&clip=clip_ONE#share"]:
@@ -48,64 +39,16 @@ class DownloaderTests(unittest.TestCase):
         path = self.links('# comment\n\nhttps://kick.com/demo/clips/clip_ONE\nhttps://kick.com/other?clip=clip_ONE\n"https://kick.com/demo?clip=clip_TWO"\n')
         self.assertEqual([x[1] for x in app.linkleri_oku(path)], ["clip_ONE", "clip_TWO"])
 
-    def test_placeholder_config_rejected(self):
-        with self.assertRaisesRegex(ValueError, "Örnek"):
-            app.js_config_oku(self.config(True))
 
-    def test_config_is_read_not_executed(self):
-        self.assertEqual(app.js_config_oku(self.config()), ("test-id", "test-secret"))
-
-    def test_environment_precedes_file(self):
-        with patch.dict(os.environ, {"KICK_CLIENT_ID": "env-id", "KICK_CLIENT_SECRET": "env-secret"}):
-            self.assertEqual(app.kimlik_bilgileri(self.root / "absent"), ("env-id", "env-secret"))
-
-    def test_incomplete_environment_rejected(self):
-        with patch.dict(os.environ, {"KICK_CLIENT_ID": "test-id"}):
-            with self.assertRaisesRegex(ValueError, "birlikte"):
-                app.kimlik_bilgileri()
-
-    def test_token_request_contract(self):
-        client = MagicMock()
-        client.post.return_value = response(payload={"access_token": "dummy-token"})
-        with patch.object(app, "curl_requests", client):
-            self.assertEqual(app.app_token_al("test-id", "test-secret"), "dummy-token")
-        args, kwargs = client.post.call_args
-        self.assertEqual(args[0], "https://id.kick.com/oauth/token")
-        self.assertEqual(kwargs["data"]["grant_type"], "client_credentials")
-        self.assertEqual(kwargs["data"]["client_secret"], "test-secret")
-        self.assertNotIn("redirect_uri", kwargs["data"])
-
-    def test_token_error_does_not_echo_response(self):
-        client = MagicMock()
-        client.post.return_value = response(401)
-        client.post.return_value.text = "sensitive-response"
-        with patch.object(app, "curl_requests", client), self.assertRaises(RuntimeError) as error:
-            app.app_token_al("test-id", "test-secret")
-        self.assertNotIn("sensitive-response", str(error.exception))
-        self.assertNotIn("test-secret", str(error.exception))
-
-    def test_malformed_token_responses_rejected(self):
-        for payload in [[], {}, {"access_token": ""}]:
-            client = MagicMock()
-            client.post.return_value = response(payload=payload)
-            with self.subTest(payload=payload), patch.object(app, "curl_requests", client), self.assertRaises(RuntimeError):
-                app.app_token_al("test-id", "test-secret")
-
-    def test_public_clip_request_has_no_token(self):
+    def test_public_clip_request(self):
         session = MagicMock()
         session.get.return_value = response(payload={"clip": {"clip_url": "https://clips.kick.com/example.mp4"}})
-        app.klip_bilgisi_al(session, "https://kick.com/demo/clips/clip_ONE", "clip_ONE", "dummy-token")
+        app.klip_bilgisi_al(session, "https://kick.com/demo/clips/clip_ONE", "clip_ONE")
         self.assertNotIn("Authorization", session.get.call_args.kwargs["headers"])
         self.assertEqual(session.get.call_count, 1)
 
-    def test_single_authenticated_fallback(self):
-        session = MagicMock()
-        session.get.side_effect = [response(401), response(payload={"clip": {"clip_url": "https://clips.kick.com/example.mp4"}})]
-        app.klip_bilgisi_al(session, "https://kick.com/demo/clips/clip_ONE", "clip_ONE", "dummy-token")
-        self.assertEqual(session.get.call_count, 2)
-        self.assertEqual(session.get.call_args.kwargs["headers"]["Authorization"], "Bearer dummy-token")
 
-    def test_no_empty_token_retry(self):
+    def test_denied_access_is_not_retried(self):
         session = MagicMock()
         session.get.return_value = response(403)
         with self.assertRaises(app.ErisimDurdu):
@@ -117,43 +60,36 @@ class DownloaderTests(unittest.TestCase):
             session = MagicMock()
             session.get.return_value = response(status)
             with self.subTest(status=status), self.assertRaises(app.ErisimDurdu):
-                app.klip_bilgisi_al(session, "https://kick.com/demo/clips/clip_ONE", "clip_ONE", "dummy-token")
-            self.assertEqual(session.get.call_count, 1 if status == 429 else 2)
+                app.klip_bilgisi_al(session, "https://kick.com/demo/clips/clip_ONE", "clip_ONE")
+            self.assertEqual(session.get.call_count, 1)
 
     def test_bad_clip_payloads_rejected(self):
         for payload in [[], {}, {"clip": {}}, {"clip": {"clip_url": "file:///local"}}]:
             session = MagicMock()
             session.get.return_value = response(payload=payload)
             with self.subTest(payload=payload), self.assertRaises(RuntimeError):
-                app.klip_bilgisi_al(session, "https://kick.com/demo/clips/clip_ONE", "clip_ONE", "dummy-token")
+                app.klip_bilgisi_al(session, "https://kick.com/demo/clips/clip_ONE", "clip_ONE")
 
     def test_download_without_completed_file_fails(self):
         downloader = MagicMock()
         downloader.YoutubeDL.return_value.__enter__.return_value.download.return_value = 0
         (self.root / "clip_ONE.mp4.part").write_bytes(b"partial")
         with patch.object(app, "yt_dlp", downloader), patch.object(app, "INDIRME_KLASORU", self.root), self.assertRaisesRegex(RuntimeError, "arşive"):
-            app.medyayi_indir("https://clips.kick.com/example.mp4", "title", "clip_ONE", "https://kick.com/demo")
+            app.medyayi_indir("https://clips.kick.com/example.mp4", "clip_ONE", "https://kick.com/demo")
 
     def test_completed_download_accepted(self):
         downloader = MagicMock()
         downloader.YoutubeDL.return_value.__enter__.return_value.download.return_value = 0
         (self.root / "clip_ONE.mp4").write_bytes(b"synthetic-video-placeholder")
         with patch.object(app, "yt_dlp", downloader), patch.object(app, "INDIRME_KLASORU", self.root):
-            app.medyayi_indir("https://clips.kick.com/example.mp4", "title", "clip_ONE", "https://kick.com/demo")
+            app.medyayi_indir("https://clips.kick.com/example.mp4", "clip_ONE", "https://kick.com/demo")
 
-    def test_dry_run_requires_no_credentials_or_network(self):
+    def test_dry_run_needs_no_network(self):
         path = self.links("https://kick.com/demo/clips/clip_ONE\n")
-        with patch.object(app, "curl_requests", None), patch.object(app, "yt_dlp", None), patch.object(app, "kimlik_bilgileri") as credentials, contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(app, "curl_requests", None), patch.object(app, "yt_dlp", None), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(app.ana_program(["--dry-run", "--links", str(path)]), 0)
-        credentials.assert_not_called()
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["list.txt"])
 
-    def test_check_api_prints_no_token_and_needs_no_list(self):
-        output = io.StringIO()
-        with patch.object(app, "curl_requests", MagicMock()), patch.object(app, "kimlik_bilgileri", return_value=("test-id", "test-secret")), patch.object(app, "app_token_al", return_value="dummy-token"), contextlib.redirect_stdout(output):
-            self.assertEqual(app.ana_program(["--check-api"]), 0)
-        self.assertNotIn("dummy-token", output.getvalue())
-        self.assertNotIn("test-secret", output.getvalue())
 
     def run_batch(self, info=None, download=None):
         path = self.links("https://kick.com/demo/clips/clip_ONE\nhttps://kick.com/demo/clips/clip_TWO\n")
@@ -161,8 +97,6 @@ class DownloaderTests(unittest.TestCase):
         self.addCleanup(stack.close)
         for name, value in {"INDIRME_KLASORU": self.root / "videos", "ARSIV_DOSYASI": self.root / "archive.txt", "HATA_DOSYASI": self.root / "errors.txt", "curl_requests": MagicMock()}.items():
             stack.enter_context(patch.object(app, name, value))
-        stack.enter_context(patch.object(app, "kimlik_bilgileri", return_value=("test-id", "test-secret")))
-        stack.enter_context(patch.object(app, "app_token_al", return_value="dummy-token"))
         info_mock = stack.enter_context(patch.object(app, "klip_bilgisi_al", side_effect=info, return_value={"clip_url": "https://clips.kick.com/example.mp4"}))
         download_mock = stack.enter_context(patch.object(app, "medyayi_indir", side_effect=download))
         with contextlib.redirect_stdout(io.StringIO()):
@@ -175,11 +109,6 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(download.call_count, 2)
         self.assertEqual(app.arsivi_oku(), {"clip_ONE", "clip_TWO"})
 
-    def test_batch_without_config_never_requests_oauth(self):
-        with patch.object(app, "CONFIG_ADAYLARI", []):
-            code, info, _ = self.run_batch()
-        self.assertEqual(code, 0)
-        self.assertEqual(info.call_args.args[3], "")
 
     def test_failed_download_not_archived_next_continues(self):
         code, _, download = self.run_batch(download=[RuntimeError("synthetic failure"), None])

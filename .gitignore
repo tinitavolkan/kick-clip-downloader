@@ -3,11 +3,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 kick-config.js
-kick api/
-kick-api/
 .env
 .env.*
-!.env.example
 klip.txt
 indirilen_klipler/
 indirilenler.txt

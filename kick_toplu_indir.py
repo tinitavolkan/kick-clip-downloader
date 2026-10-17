@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -21,26 +20,11 @@ except ImportError:
 
 ANA_KLASOR = Path(__file__).resolve().parent
 
-# Dosyalar aynı klasördeyse ilk yollar kullanılır.
-# "kick api" adlı alt klasöre koyduysan ikinci yollar kullanılır.
-CONFIG_ADAYLARI = [
-    ANA_KLASOR / "kick-config.js",
-    ANA_KLASOR / "kick api" / "kick-config.js",
-    ANA_KLASOR / "kick-api" / "kick-config.js",
-]
-
-LINK_DOSYASI_ADAYLARI = [
-    ANA_KLASOR / "klip.txt",
-    ANA_KLASOR / "kick api" / "klip.txt",
-    ANA_KLASOR / "kick-api" / "klip.txt",
-]
-
 INDIRME_KLASORU = ANA_KLASOR / "indirilen_klipler"
 ARSIV_DOSYASI = ANA_KLASOR / "indirilenler.txt"
 HATA_DOSYASI = ANA_KLASOR / "basarisiz_klipler.txt"
 
-TOKEN_URL = "https://id.kick.com/oauth/token"
-KLIP_API_URL = "https://kick.com/api/v2/clips/{clip_id}/play"
+KLIP_OYNATMA_URL = "https://kick.com/api/v2/clips/{clip_id}/play"
 
 def klip_linki(link: str) -> tuple[str, str] | None:
     try:
@@ -59,92 +43,6 @@ def klip_linki(link: str) -> tuple[str, str] | None:
             return None
         kanal, clip_id = kanal_yolu.group(1), kimlikler[0]
     return f"https://kick.com/{kanal}/clips/{clip_id}", clip_id
-
-
-def dosya_bul(adaylar: list[Path], aciklama: str) -> Path:
-    for yol in adaylar:
-        if yol.is_file():
-            return yol
-
-    denenmis = "\n".join(f"  - {yol}" for yol in adaylar)
-    raise FileNotFoundError(
-        f"{aciklama} bulunamadı. Kontrol edilen yollar:\n{denenmis}"
-    )
-
-
-def js_config_oku(config_yolu: Path) -> tuple[str, str]:
-    """kick-config.js içindeki CLIENT ID ve CLIENT SECRET değerlerini okur."""
-    metin = config_yolu.read_text(encoding="utf-8-sig")
-
-    client_id_eslesme = re.search(
-        r"KICK_CLIENT_ID\s*:\s*['\"]([^'\"]+)['\"]", metin
-    )
-    client_secret_eslesme = re.search(
-        r"KICK_CLIENT_SECRET\s*:\s*['\"]([^'\"]+)['\"]", metin
-    )
-
-    if not client_id_eslesme or not client_secret_eslesme:
-        raise ValueError(
-            "kick-config.js içinde KICK_CLIENT_ID veya "
-            "KICK_CLIENT_SECRET bulunamadı."
-        )
-
-    degerler = client_id_eslesme.group(1), client_secret_eslesme.group(1)
-    if any(deger.startswith("YOUR_") for deger in degerler):
-        raise ValueError("Örnek ayarları kendi Kick Client ID ve Client Secret bilgilerinle doldur.")
-    return degerler
-
-
-def kimlik_bilgileri(config_yolu: Path | None = None) -> tuple[str, str]:
-    client_id = os.environ.get("KICK_CLIENT_ID", "").strip()
-    client_secret = os.environ.get("KICK_CLIENT_SECRET", "").strip()
-    if client_id or client_secret:
-        if not client_id or not client_secret:
-            raise ValueError("KICK_CLIENT_ID ve KICK_CLIENT_SECRET birlikte tanımlanmalı.")
-        if client_id.startswith("YOUR_") or client_secret.startswith("YOUR_"):
-            raise ValueError("Örnek ortam değişkenlerini kendi bilgilerinle doldur.")
-        return client_id, client_secret
-    return js_config_oku(config_yolu or dosya_bul(CONFIG_ADAYLARI, "kick-config.js"))
-
-
-def app_token_al(client_id: str, client_secret: str) -> str:
-    """Kick OAuth client_credentials akışıyla uygulama tokenı alır."""
-    if curl_requests is None:
-        raise RuntimeError(
-            'curl_cffi kurulu değil. Terminalde şu komutu çalıştır:\n'
-            'py -m pip install -U "yt-dlp[default,curl-cffi]"'
-        )
-
-    yanit = curl_requests.post(
-        TOKEN_URL,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        data={
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-        },
-        timeout=30,
-    )
-
-    if yanit.status_code >= 400:
-        raise RuntimeError(
-            f"Kick API token alınamadı. HTTP {yanit.status_code}: "
-            "Client ID/Secret ve Kick geliştirici ayarlarını kontrol et."
-        )
-
-    try:
-        veri = yanit.json()
-    except json.JSONDecodeError as hata:
-        raise RuntimeError("Kick token yanıtı JSON değil.") from hata
-
-    token = veri.get("access_token") if isinstance(veri, dict) else None
-    if not isinstance(token, str) or not token:
-        raise RuntimeError("Kick token yanıtında access_token bulunamadı.")
-
-    return token
 
 
 class ErisimDurdu(RuntimeError):
@@ -195,25 +93,13 @@ def arsive_ekle(clip_id: str) -> None:
         dosya.write(f"{clip_id}\n")
 
 
-def guvenli_dosya_adi(metin: str, azami_uzunluk: int = 140) -> str:
-    metin = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", metin)
-    metin = re.sub(r"\s+", " ", metin).strip().rstrip(". ")
-    return (metin or "Kick klibi")[:azami_uzunluk].rstrip(". ")
-
-
 def klip_bilgisi_al(
     oturum: Any,
     orijinal_link: str,
     clip_id: str,
-    app_token: str = "",
 ) -> dict[str, Any]:
-    """
-    Kick'in klip oynatma uç noktasından klip bilgisini alır.
-
-    İlk istek public erişim şeklinde yapılır. 401/403 gelirse
-    yalnız yapılandırılmış bir app token varsa bir kez tekrar denenir.
-    """
-    url = KLIP_API_URL.format(clip_id=clip_id)
+    """Herkese açık klibin medya bilgisini okur."""
+    url = KLIP_OYNATMA_URL.format(clip_id=clip_id)
     temel_basliklar = {
         "Accept": "application/json, text/plain, */*",
         "Origin": "https://kick.com",
@@ -222,13 +108,6 @@ def klip_bilgisi_al(
 
     yanit = oturum.get(url, headers=temel_basliklar, timeout=30)
 
-    if yanit.status_code in {401, 403} and app_token:
-        yetkili_basliklar = {
-            **temel_basliklar,
-            "Authorization": f"Bearer {app_token}",
-        }
-        yanit = oturum.get(url, headers=yetkili_basliklar, timeout=30)
-
     if yanit.status_code >= 400:
         hata = ErisimDurdu if yanit.status_code in {401, 403, 429} else RuntimeError
         raise hata(f"Klip bilgisi alınamadı. HTTP {yanit.status_code}.")
@@ -236,15 +115,15 @@ def klip_bilgisi_al(
     try:
         veri = yanit.json()
     except json.JSONDecodeError as hata:
-        raise RuntimeError("Klip API yanıtı JSON değil.") from hata
+        raise RuntimeError("Klip yanıtı JSON değil.") from hata
 
     klip = veri.get("clip") if isinstance(veri, dict) else None
     if not isinstance(klip, dict):
-        raise RuntimeError("Klip API yanıtında 'clip' alanı bulunamadı.")
+        raise RuntimeError("Klip yanıtında 'clip' alanı bulunamadı.")
 
     clip_url = klip.get("clip_url")
     if not isinstance(clip_url, str) or not clip_url:
-        raise RuntimeError("Klip API yanıtında clip_url bulunamadı.")
+        raise RuntimeError("Klip yanıtında clip_url bulunamadı.")
     if not clip_url.startswith("https://"):
         raise RuntimeError("Klip medya adresi HTTPS değil.")
 
@@ -253,7 +132,6 @@ def klip_bilgisi_al(
 
 def medyayi_indir(
     medya_url: str,
-    baslik: str,
     clip_id: str,
     referer: str,
 ) -> None:
@@ -263,7 +141,6 @@ def medyayi_indir(
             'py -m pip install -U "yt-dlp[default,curl-cffi]"'
         )
 
-    temiz_baslik = guvenli_dosya_adi(baslik)
     cikti_sablonu = INDIRME_KLASORU / f"{clip_id}.%(ext)s"
 
     ayarlar = {
@@ -301,42 +178,27 @@ def medyayi_indir(
 def ana_program(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Kick klip bağlantılarını sırayla indirir.")
     parser.add_argument("--links", type=Path, help="Bağlantı listesi (varsayılan: klip.txt)")
-    parser.add_argument("--config", type=Path, help="Kendi kick-config.js dosyan")
-    modlar = parser.add_mutually_exclusive_group()
-    modlar.add_argument("--dry-run", action="store_true", help="Yalnız bağlantıları doğrula; ağa bağlanmaz")
-    modlar.add_argument("--check-api", action="store_true", help="Yalnız OAuth bağlantısını kontrol et; tokenı göstermez")
+    parser.add_argument("--dry-run", action="store_true", help="Yalnız bağlantıları doğrula; ağa bağlanmaz")
     args = parser.parse_args(argv)
     print("Kick toplu klip indirme programı")
 
-    if not args.dry_run and (curl_requests is None or (yt_dlp is None and not args.check_api)):
+    if not args.dry_run and (curl_requests is None or yt_dlp is None):
         print("\nGerekli paketler eksik.")
         print('VS Code terminalinde şunu çalıştır:')
         print('python -m pip install -r requirements.txt')
         return 1
 
     try:
-        if not args.check_api:
-            link_dosyasi = args.links or dosya_bul(LINK_DOSYASI_ADAYLARI, "klip.txt")
-            print(f"Link dosyası: {link_dosyasi}")
-            linkler = linkleri_oku(link_dosyasi)
-            if not linkler:
-                print("\nİndirilecek geçerli Kick klibi bulunamadı.")
-                return 1
-            if args.dry_run:
-                print(f"{len(linkler)} farklı geçerli klip; ağ isteği ve indirme yapılmadı.")
-                return 0
-
-        app_token = ""
-        ayar_var = args.config is not None or any(os.environ.get(key) for key in ("KICK_CLIENT_ID", "KICK_CLIENT_SECRET")) or any(yol.is_file() for yol in CONFIG_ADAYLARI)
-        if args.check_api or ayar_var:
-            client_id, client_secret = kimlik_bilgileri(args.config)
-            print("\nKick OAuth uygulama tokenı alınıyor...")
-            app_token = app_token_al(client_id, client_secret)
-            print("Kick OAuth bağlantısı başarılı. Klip erişimi ayrıca kontrol edilir.")
-        else:
-            print("OAuth ayarı yok; kliplerin herkese açık erişimi kullanılacak.")
-        if args.check_api:
+        link_dosyasi = args.links or ANA_KLASOR / "klip.txt"
+        print(f"Link dosyası: {link_dosyasi}")
+        linkler = linkleri_oku(link_dosyasi)
+        if not linkler:
+            print("\nİndirilecek geçerli Kick klibi bulunamadı.")
+            return 1
+        if args.dry_run:
+            print(f"{len(linkler)} farklı geçerli klip; ağ isteği ve indirme yapılmadı.")
             return 0
+
         print(f"İndirme klasörü: {INDIRME_KLASORU}")
 
         INDIRME_KLASORU.mkdir(parents=True, exist_ok=True)
@@ -358,12 +220,12 @@ def ana_program(argv: list[str] | None = None) -> int:
                 continue
 
             try:
-                klip = klip_bilgisi_al(oturum, link, clip_id, app_token)
+                klip = klip_bilgisi_al(oturum, link, clip_id)
                 medya_url = str(klip["clip_url"])
                 baslik = str(klip.get("title") or clip_id)
 
                 print(f"Başlık: {baslik}")
-                medyayi_indir(medya_url, baslik, clip_id, link)
+                medyayi_indir(medya_url, clip_id, link)
 
                 arsive_ekle(clip_id)
                 indirilenler.add(clip_id)
